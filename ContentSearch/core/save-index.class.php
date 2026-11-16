@@ -113,11 +113,31 @@ class csIndex {
     // テンプレートなし（?template=blank）でページを取得する。失敗したら false
     private function fetchDocument($id, $options = []) {
         $url = evo()->makeUrl($id, '', '', 'full');
+        // ウェブリンク（外部サイトを指す記事）では makeUrl() が外部の URL を返す。
+        // 取得には Basic 認証の情報や索引用のトークンを付けるので、サイト自身の URL のときだけ取得する
+        if (!$this->isSiteUrl($url)) {
+            return false;
+        }
         $this->renewIndexToken();
         return $this->get_contents(
             $url . (strpos($url, '?') === false ? '?' : '&') . 'template=blank',
             $options
         );
+    }
+
+    // $url がサイト自身（site_url と同じスキーム・ホスト・ポート）を指しているか
+    private function isSiteUrl($url) {
+        $site = parse_url((string) evo()->getConfig('site_url'));
+        $target = parse_url((string) $url);
+        if (empty($site['host']) || empty($target['host'])) {
+            return false;
+        }
+        $origin = function ($u) {
+            $scheme = strtolower(isset($u['scheme']) ? $u['scheme'] : 'http');
+            $port = isset($u['port']) ? (int) $u['port'] : ($scheme === 'https' ? 443 : 80);
+            return $scheme . '://' . strtolower($u['host']) . ':' . $port;
+        };
+        return $origin($site) === $origin($target);
     }
 
     /**
