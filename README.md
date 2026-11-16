@@ -53,7 +53,7 @@ MODX Evolution用のコンテンツ検索スニペットです。コンテンツ
 | `mode` | 検索モード（`like`/`auto`/`fulltext`）。下の「検索モードの挙動」を参照。 | `like` |
 | `minChars` | 最低入力文字数。未指定時はチェックなし。 | なし |
 | `keyword` | キーワードを受け取るクエリパラメータ名。 | `keyword` |
-| `basicAuth` | インデックス作成時に使用する Basic 認証情報（`user:pass`）。未指定なら、管理者がアクセスしているときの認証情報を使います（サイト全体に Basic 認証をかけている場合は通常不要）。 | なし |
+| `basicAuth` | インデックス作成時に使用する Basic 認証情報（`user:pass`）。未指定なら、管理者がアクセスしているときの認証情報を使います（サイト全体に Basic 認証をかけている場合は通常不要）。指定した値は、記事保存時の索引更新でも使うため、システム設定 `cs_index_options` に保存されます。 | なし |
 | `returnResponse` | スニペットの戻り値を出力するかどうか。 | `true` |
 | `placeholder-key` | プレースホルダーにセットするキー名。 | `ContentSearch` |
 | `additionalKeywordField` | 追加でキーワード化するフィールド名。 | 空文字 |

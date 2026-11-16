@@ -80,9 +80,11 @@ class EvoContentSearch
         if(!evo()->isLoggedIn('manager')) {
             return;
         }
-        // プラグインはスニペットの設定を見られないので、索引に関わる設定を保存しておく
+        // プラグインはスニペットの設定を見られないので、索引に関わる設定を保存しておく。
+        // basicAuth はスニペットのパラメータやテーマの設定ファイルと同じ平文で、システム設定 cs_index_options に入る
         $this->saveIndex->saveOptions([
-            'additionalKeywordField' => (string) $this->config('additionalKeywordField', '')
+            'additionalKeywordField' => (string) $this->config('additionalKeywordField', ''),
+            'basicAuth' => (string) $this->config('basicAuth', '')
         ]);
 
         $tableExists = db()->tableExists(db()->config['table_prefix'] . 'search_content');

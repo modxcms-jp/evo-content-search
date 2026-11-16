@@ -82,7 +82,8 @@ class csIndex {
         $text = false;
         if ($row['published']) {
             $this->beginCrawl();
-            $text = $this->fetchDocument($id);
+            // 公開側だけに Basic 認証をかけているサイトもあるので、設定の basicAuth があれば使う
+            $text = $this->fetchDocument($id, ['basicAuth' => (string) $this->config('basicAuth', '')]);
             $this->endCrawl();
         }
         $this->save($row, $text === false || $text === null ? $row['content'] : $text);
