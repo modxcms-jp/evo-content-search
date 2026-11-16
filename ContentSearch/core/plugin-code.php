@@ -31,7 +31,6 @@ if ($csEvent === 'OnDocFormSave' || $csEvent === 'OnDocPublished') {
     if (!$csId || !is_file($csCore . '/save-index.class.php')) {
         return;
     }
-    include_once $csCore . '/functions.php';
     include_once $csCore . '/save-index.class.php';
     $csIndex = new csIndex(csIndex::savedOptions());
     $csIndex->saveDocument($csId);

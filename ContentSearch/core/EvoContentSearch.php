@@ -54,12 +54,12 @@ class EvoContentSearch
         $theme = isset(event()->params['theme']) ? event()->params['theme'] : '';
         $themeConfigPath = $this->themePath() . $theme . '/config.php';
         if(!$theme || !is_file($themeConfigPath)) {
-            return $this->array_merge($defaultConfig, event()->params);
+            return $this->mergeRecursive($defaultConfig, event()->params);
         }
 
         $themeConfig = include $themeConfigPath;
         if (!$themeConfig) {
-            return $this->array_merge($defaultConfig, event()->params);
+            return $this->mergeRecursive($defaultConfig, event()->params);
         }
         foreach (['css', 'tplForm', 'tplResults', 'tplPaginate'] as $k) {
             if (!isset($themeConfig[$k])) {
@@ -67,8 +67,8 @@ class EvoContentSearch
             }
         }
 
-        return $this->array_merge(
-            $this->array_merge($defaultConfig, $themeConfig)
+        return $this->mergeRecursive(
+            $this->mergeRecursive($defaultConfig, $themeConfig)
             , event()->params
         );
     }
@@ -260,11 +260,14 @@ class EvoContentSearch
         return $expected !== '' && is_string($token) && hash_equals($expected, $token);
     }
 
-    public function set($key, $value) {
-        $this->$key = $value;
-    }
-
+    /**
+     * 表示用の値を返す（bootstrap.php が使う）。読めるのは下の一覧にあるものだけ
+     * （以前はどの private プロパティでも読み書きできたが、外から変えてよい値は無い）
+     */
     public function get($key, $default=null) {
+        if (!in_array($key, ['keyword', 'form', 'total', 'time', 'results', 'paginate'], true)) {
+            return $default;
+        }
         if($this->$key === null) {
             return $default;
         }
@@ -609,7 +612,7 @@ class EvoContentSearch
         if(!$this->request && !$array) {
             return null;
         }
-        return http_build_query($this->array_merge($this->request, $array));
+        return http_build_query($this->mergeRecursive($this->request, $array));
     }
 
     private function limit($limit, $offset=0) {
@@ -819,10 +822,11 @@ class EvoContentSearch
         );
     }
 
-    private function array_merge($a,$b) {
+    // 配列を再帰的に重ねる（PHP の array_merge と違い、入れ子の配列はキーごとに上書きする）
+    private function mergeRecursive($a,$b) {
         foreach($b as $k=>$v) {
             if(isset($a[$k]) && is_array($v)) {
-                $a[$k] = $this->array_merge($a[$k], $v);
+                $a[$k] = $this->mergeRecursive($a[$k], $v);
                 continue;
             }
             $a[$k] = $v;

@@ -1,6 +1,13 @@
 <?php
 include_once 'define-path.php';
-include_once 'core/functions.php';
+
+// evolution-jp 1.3 以上の本体にある補助関数を使う。古い本体では動かないので、エラーにせず案内を出す
+foreach (['evo', 'db', 'event', 'hsc', 'array_get', 'getv', 'serverv', 'globalv'] as $csRequired) {
+    if (!function_exists($csRequired)) {
+        return '<p>ContentSearch は evolution-jp 1.3 以上で動作します。</p>';
+    }
+}
+
 include_once 'core/EvoContentSearch.php';
 
 $search = new EvoContentSearch();
