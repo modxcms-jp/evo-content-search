@@ -7,6 +7,8 @@ class EvoContentSearch
     private $saveIndex;
     private $request;
     private $limit;
+    private $offset = 0;
+    private $maxLimit = 100;
     private $results;
     private $rows;
     private $total;
@@ -125,14 +127,15 @@ class EvoContentSearch
 
     public function setProps() {
         $this->orderby = getv('orderby','rel');
-        $this->limit = getv('limit') ?: $this->config('limit',10);
+        $this->limit = $this->sanitizeLimit(getv('limit'));
+        $this->offset = $this->sanitizeOffset(getv('offset'));
         $this->form = evo()->parseText(
             $this->config('tplForm.wrap'), [
                 'keyword' => $this->keyword,
                 'orderby.rel.checked'  => $this->orderby==='rel' ? 'checked' : '',
                 'orderby.date.checked' => $this->orderby==='date' ? 'checked' : '',
                 'limit' => $this->limit,
-                'offset' => getv('offset',0),
+                'offset' => $this->offset,
                 'admin-widget' => $this->adminWidgetMessage()
             ]
         );
@@ -181,7 +184,7 @@ class EvoContentSearch
         }
         $this->results = implode("\n", $results);
         $this->paginate = $this->total
-            ? $this->buildPaginate($this->total, $this->limit, getv('offset',0))
+            ? $this->buildPaginate($this->total, $this->limit, $this->offset)
             : null
         ;
         evo()->setPlaceholder(
@@ -303,7 +306,7 @@ class EvoContentSearch
                 $this->matchAgainst($keyword)
             ),
             $this->orderby==='rel' ? 'relevance_score DESC' : 'stext.publishedon DESC',
-            $this->limit($this->limit, getv('offset'))
+            $this->limit($this->limit, $this->offset)
         );
     }
     private function matchAgainst($keyword) {
@@ -346,7 +349,7 @@ class EvoContentSearch
             ],
             $this->likeWhere($keyword),
             $this->orderby==='rel' ? 'relevance_score DESC' : 'stext.publishedon DESC',
-            $this->limit($this->limit, getv('offset'))
+            $this->limit($this->limit, $this->offset)
         );
     }
 
@@ -486,17 +489,16 @@ class EvoContentSearch
         if(!$this->isInt($total) || !$this->isInt($limit)) {
             return null;
         }
-        $offset = getv('offset',0);
         $c=0;
         $pages = [];
         unset($this->request['offset']);
-        $num = !getv('offset') ? 1 : round(getv('offset')/$limit)+1;
+        $num = !$this->offset ? 1 : round($this->offset/$limit)+1;
         if($num <= 5) {
             $num = 1;
         } elseif(5<$num) {
             $num = $num-4;
         }
-        $current_num = (getv('offset',0)/$limit)+1;
+        $current_num = ($this->offset/$limit)+1;
         // $this->config('tplPaginate.current-item'),
         while($c<10) {
             if($num==$current_num) {
@@ -555,10 +557,37 @@ class EvoContentSearch
     }
 
     private function limit($limit, $offset=0) {
+        $limit = (int) $limit;
+        $offset = (int) $offset;
         if(!$offset) {
-            return $limit;
+            return (string) $limit;
         }
         return $limit . ' OFFSET ' . $offset;
+    }
+
+    /**
+     * リクエストの limit を 1 以上の整数にする（SQL の LIMIT にそのまま入るため）
+     * 上限は maxLimit（設定の limit がそれより大きければ設定値）
+     */
+    private function sanitizeLimit($value) {
+        $default = (int) $this->config('limit', 10);
+        if ($default < 1) {
+            $default = 10;
+        }
+        if (!is_string($value) || !$this->isInt($value) || (int) $value < 1) {
+            return $default;
+        }
+        return min((int) $value, max($this->maxLimit, $default));
+    }
+
+    /**
+     * リクエストの offset を 0 以上の整数にする（SQL の OFFSET にそのまま入るため）
+     */
+    private function sanitizeOffset($value) {
+        if (!is_string($value) || !$this->isInt($value)) {
+            return 0;
+        }
+        return (int) $value;
     }
 
     private function fetchTotalFulltext($keyword) {
