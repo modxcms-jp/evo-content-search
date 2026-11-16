@@ -90,6 +90,11 @@ class EvoContentSearch
         ]);
 
         $tableExists = db()->tableExists(db()->config['table_prefix'] . 'search_content');
+        // プラグインのコードは作成時に DB へ写されるので、ファイルを更新しても既存サイトには反映されない。
+        // 管理者が検索ページを開いたときに最新にしておく（索引に更新が無くても、ここで反映される）
+        if($tableExists && $this->saveIndex->syncPlugin()) {
+            evo()->clearCache('full');
+        }
         if(getv('reset') || !$tableExists) {
             // 再構築はテーブルを作り直して全ページを取り直す重い処理。
             // 他サイトに仕込んだリンクで管理者に実行させられないよう（CSRF）、管理者のセッションに結びついたトークンを求める
