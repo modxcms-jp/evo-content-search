@@ -284,14 +284,18 @@ class EvoContentSearch
     }
 
     private function fulltextQuery($keyword) {
+        $baseScoreExpr = sprintf(
+            "MATCH (`tokens`) AGAINST (%s)",
+            $this->matchAgainst($keyword)
+        );
         $field = [
             sprintf(
-                "stext.*,content.*, MATCH (`tokens`) AGAINST (%s) as base_score",
-                $this->matchAgainst($keyword)
+                "stext.*,content.*, %s as base_score",
+                $baseScoreExpr
             )
         ];
         if($this->orderby==='rel') {
-            $field[] = $this->generateRelevanceScore($keyword);
+            $field[] = $this->generateRelevanceScore($keyword, $baseScoreExpr);
         }
 
         return db()->select(
@@ -340,7 +344,7 @@ class EvoContentSearch
             )
         ];
         if($this->orderby==='rel') {
-            $field[] = $this->generateRelevanceScore($keyword);
+            $field[] = $this->generateRelevanceScore($keyword, $occurrenceCountExpr);
         }
         return db()->select(
             implode(',', $field), [
@@ -363,10 +367,14 @@ class EvoContentSearch
      * - 新しさ（フレッシュネス）
      * - 短いキーワードの誤ヒット対策
      *
+     * MySQL では同じ SELECT 句の別名（base_score など）を式の中で参照できないため、
+     * ベーススコアは別名ではなく式そのものを受け取って埋め込む
+     *
      * @param string $keyword 検索キーワード
+     * @param string $baseScoreExpr ベーススコアの SQL 式（FULLTEXT の MATCH または出現回数）
      * @return string SQL式
      */
-    private function generateRelevanceScore($keyword) {
+    private function generateRelevanceScore($keyword, $baseScoreExpr) {
         $escaped = db()->escape($keyword);
         $escapedLike = db()->escape($this->escapeLikeWildcard($keyword));
         $escapeChar = db()->escape($this->likeEscapeChar);
@@ -374,7 +382,7 @@ class EvoContentSearch
         return sprintf("
             (
                 -- ベーススコア（FULLTEXT または 出現回数）
-                COALESCE(base_score, cnt, 1.0)
+                COALESCE(%s, 1.0)
 
                 -- フィールドブースト（多段階の重み付け）
                 * CASE
@@ -422,6 +430,7 @@ class EvoContentSearch
 
             ) as relevance_score
         ",
+            $baseScoreExpr, // ベーススコア
             $escaped,      // タイトル完全一致
             $escapedLike,  // タイトル先頭一致
             $escapeChar,   // タイトル先頭一致: ESCAPE
