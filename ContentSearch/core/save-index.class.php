@@ -6,6 +6,7 @@ class csIndex {
     private $bearer_token;
     // ?template=blank で本文だけを取得するためのトークン（plugin-code.php が照合する）
     private $index_token;
+    private $index_token_id;
 
     public function __construct($config) {
         $this->config = $config;
@@ -72,18 +73,50 @@ class csIndex {
     /**
      * 取得用のトークンを発行し、ハッシュと有効期限をシステム設定に保存する
      * （saveAll の max_execution_time に合わせて 10 分有効）
+     *
+     * インデックス作成は複数のリクエストで同時に始まることがある。1つの設定を共有すると、
+     * 後から始まった側が先の側のトークンを上書きし、終わった側が相手のトークンを消してしまうので、
+     * 作成ごとに別の設定（cs_index_token_<ID>）を作り、取り消すときは自分の分だけ消す。
+     * ヘッダーには「ID.トークン」を送る（plugin-code.php が ID で設定を引いて照合する）
      */
     private function issueIndexToken() {
+        $this->deleteExpiredIndexTokens();
+        $this->index_token_id = bin2hex(random_bytes(8));
         $this->index_token = bin2hex(random_bytes(32));
         $this->saveSystemSetting(
-            'cs_index_token',
+            'cs_index_token_' . $this->index_token_id,
             hash('sha256', $this->index_token) . ':' . (time() + 600)
         );
     }
 
     private function revokeIndexToken() {
+        if ($this->index_token_id) {
+            db()->delete(
+                db()->getFullTableName('system_settings'),
+                sprintf("setting_name='cs_index_token_%s'", $this->index_token_id)
+            );
+        }
+        $this->index_token_id = null;
         $this->index_token = null;
-        $this->saveSystemSetting('cs_index_token', '');
+    }
+
+    // 途中で止まったインデックス作成が残した、期限切れのトークンを消す
+    private function deleteExpiredIndexTokens() {
+        $rs = db()->select(
+            'setting_name,setting_value',
+            db()->getFullTableName('system_settings'),
+            "setting_name LIKE 'cs\\_index\\_token\\_%'"
+        );
+        while ($row = db()->getRow($rs)) {
+            $parts = explode(':', (string) $row['setting_value'], 2);
+            if (isset($parts[1]) && time() <= (int) $parts[1]) {
+                continue;
+            }
+            db()->delete(
+                db()->getFullTableName('system_settings'),
+                sprintf("setting_name='%s'", db()->escape($row['setting_name']))
+            );
+        }
     }
 
     private function treatText($text) {
@@ -187,7 +220,7 @@ class csIndex {
 
         $headers = [];
         if ($this->index_token) {
-            $headers[] = 'X-ContentSearch-Token: ' . $this->index_token;
+            $headers[] = 'X-ContentSearch-Token: ' . $this->index_token_id . '.' . $this->index_token;
         }
         if ($this->bearer_token) {
             $headers[] = 'Authorization: Bearer '. $this->bearer_token;
