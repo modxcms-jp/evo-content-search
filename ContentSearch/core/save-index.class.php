@@ -24,8 +24,10 @@ class csIndex {
         ini_set('max_execution_time', 600);
         ini_set('default_socket_timeout',600);
 
+        // 公開前（予約公開を含む）の記事も入れる。予約公開の時点では取得しないので、ここで外すと公開後も検索に出ない。
+        // 検索結果に出すかどうかは、検索するときの公開状態で決まる
         $where = [
-            'published=1 and deleted=0 and searchable=1 and privateweb=0'
+            'deleted=0 and searchable=1 and privateweb=0'
         ];
 
         if(!$cs_recent_update) {
@@ -38,7 +40,7 @@ class csIndex {
             $where[] = 'AND id != ' . db()->escape(evo()->documentIdentifier);
         }
         $rs = db()->select(
-            'id,pagetitle,description,content,publishedon,editedon,searchable',
+            'id,pagetitle,description,content,publishedon,editedon,searchable,published',
             db()->getFullTableName('site_content'),
             implode(' ', $where)
         );
@@ -48,7 +50,9 @@ class csIndex {
             if(!$row['content']) {
                 continue;
             }
-            $this->save($row, $this->fetchDocument($row['id'], $options));
+            $text = $row['published'] ? $this->fetchDocument($row['id'], $options) : false;
+            // 取得できない（公開前など）ときは本文をそのまま使う（スニペットの結果は入らない）
+            $this->save($row, $text === false || $text === null ? $row['content'] : $text);
         }
         $this->endCrawl();
 
