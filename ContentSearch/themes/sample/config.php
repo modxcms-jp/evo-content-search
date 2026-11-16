@@ -2,7 +2,7 @@
 return [
     'returnResponse' => true,
     'placeholder-key' => 'MyContentSeach',
-    'mode' => 'auto', // auto|fulltext|like
+    'mode' => 'like', // like|auto|fulltext（日本語のサイトは like がおすすめ）
     'limit' => 10,
     'summaryLength'=> 200,
     // 'minChars' => 2,

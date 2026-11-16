@@ -347,11 +347,7 @@ class EvoContentSearch
         return db()->select(
             implode(',', $field),
             $this->searchFrom(),
-            sprintf(
-                "MATCH (`tokens`) AGAINST (%s)",
-                // "MATCH (tokens) AGAINST ('%s' IN BOOLEAN MODE)",
-                $this->matchAgainst($keyword)
-            ),
+            $this->fulltextWhere($keyword),
             $this->orderby==='rel' ? 'relevance_score DESC' : 'stext.publishedon DESC',
             $this->limit($this->limit, $this->offset)
         );
@@ -653,12 +649,20 @@ class EvoContentSearch
             db()->select(
                 'count(*) as total',
                 $this->searchFrom(),
-                sprintf(
-                    "MATCH (`tokens`) AGAINST (%s)",
-                    // "MATCH (tokens) AGAINST ('%s' IN BOOLEAN MODE)",
-                    $this->matchAgainst($keyword)
-                )
+                $this->fulltextWhere($keyword)
             )
+        );
+    }
+
+    /**
+     * FULLTEXT の検索条件。InnoDB の標準パーサーは日本語を正しく区切れず、キーワードを含まないページも返すので
+     * （「ホームページ」で「プライバシーポリシー」など）、部分一致の条件を重ねて、キーワードを含むページだけに絞る
+     */
+    private function fulltextWhere($keyword) {
+        return sprintf(
+            "MATCH (`tokens`) AGAINST (%s) AND (%s)",
+            $this->matchAgainst($keyword),
+            $this->likeWhere($keyword)
         );
     }
     private function fetchTotalLike($keyword) {
