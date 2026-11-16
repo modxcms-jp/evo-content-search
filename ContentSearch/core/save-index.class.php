@@ -1,9 +1,11 @@
 <?php
 class csIndex {
     private $pluginName = 'ContentSearch';
-    private $version = '1.0.0';
+    private $version = '1.1.0';
     private $config;
     private $bearer_token;
+    // ?template=blank で本文だけを取得するためのトークン（plugin-code.php が照合する）
+    private $index_token;
 
     public function __construct($config) {
         $this->config = $config;
@@ -43,20 +45,45 @@ class csIndex {
             evo()->saveBearerToken($this->bearer_token, time() + 60*60*3);
         }
 
+        // プラグインを最新のコードにしてから、取得用のトークンを発行する
+        if ($this->syncPlugin()) {
+            evo()->clearCache('full');
+        }
+        $this->issueIndexToken();
+
         while($row = db()->getRow($rs)) {
             if(!$row['content']) {
                 continue;
             }
+            $url = evo()->makeUrl($row['id'],'','','full');
             $this->save(
                 $row,
                 $this->get_contents(
-                    evo()->makeUrl($row['id'],'','','full') . '?template=blank',
+                    $url . (strpos($url, '?') === false ? '?' : '&') . 'template=blank',
                     $options
                 )
             );
         }
 
+        $this->revokeIndexToken();
         evo()->clearCache('full');
+    }
+
+    /**
+     * 取得用のトークンを発行し、ハッシュと有効期限をシステム設定に保存する
+     * （saveAll の max_execution_time に合わせて 10 分有効）
+     */
+    private function issueIndexToken() {
+        $this->index_token = bin2hex(random_bytes(32));
+        $this->saveSystemSetting(
+            'cs_index_token',
+            hash('sha256', $this->index_token) . ':' . (time() + 600)
+        );
+    }
+
+    private function revokeIndexToken() {
+        $this->index_token = null;
+        $this->saveSystemSetting('cs_index_token', '');
     }
 
     private function treatText($text) {
@@ -65,41 +92,80 @@ class csIndex {
         return $text;
     }
 
-    public function hasPlugin() {
-        return db()->getRecordCount(
-            db()->select(
-                'id',
-                db()->getFullTableName('site_plugins'),
-                sprintf(
-                    "name='%s' AND disabled=0",
-                    db()->escape($this->pluginName)
-                )
-            )
-        );
-    }
-
     public function createPlugin() {
         $id = db()->insert(
             [
                 'name' => db()->escape($this->pluginName),
-                'description' => '@version ' . $this->version . "\n" . 'Search plugin for site_content',
-                'plugincode' => db()->escape(
-                    preg_replace(
-                        '@^<?php\n*@',
-                        '',
-                        file_get_contents(__DIR__ . '/plugin-code.php')
-                    )
-                )
+                'description' => db()->escape($this->pluginDescription()),
+                'plugincode' => db()->escape($this->pluginCode())
             ],
             db()->getFullTableName('site_plugins')
         );
         db()->insert(
             [
                 'pluginid' => $id,
-                'evtid' => 91
+                'evtid' => $this->eventId('OnLoadWebDocument', 91)
             ],
             db()->getFullTableName('site_plugin_events')
         );
+    }
+
+    /**
+     * 登録済みのプラグインを plugin-code.php の内容に合わせる。無ければ作る
+     * プラグインのコードは作成時に DB へ写されるので、ファイルを更新しても既存サイトには反映されないため
+     * 管理者が無効にしたプラグインは、無効のまま中身だけ更新する
+     *
+     * @return bool 作成または更新したら true
+     */
+    public function syncPlugin() {
+        $row = db()->getRow(
+            db()->select(
+                'id,plugincode',
+                db()->getFullTableName('site_plugins'),
+                sprintf("name='%s'", db()->escape($this->pluginName)),
+                'id ASC',
+                1
+            )
+        );
+        if (!$row) {
+            $this->createPlugin();
+            return true;
+        }
+        if ($row['plugincode'] === $this->pluginCode()) {
+            return false;
+        }
+        db()->update(
+            [
+                'description' => db()->escape($this->pluginDescription()),
+                'plugincode' => db()->escape($this->pluginCode())
+            ],
+            db()->getFullTableName('site_plugins'),
+            'id=' . (int) $row['id']
+        );
+        return true;
+    }
+
+    private function pluginCode() {
+        return preg_replace(
+            '@^<\?php\s*@',
+            '',
+            file_get_contents(__DIR__ . '/plugin-code.php')
+        );
+    }
+
+    private function pluginDescription() {
+        return '@version ' . $this->version . "\n" . 'Search plugin for site_content';
+    }
+
+    private function eventId($name, $default) {
+        $id = db()->getValue(
+            db()->select(
+                'id',
+                db()->getFullTableName('system_eventnames'),
+                sprintf("name='%s'", db()->escape($name))
+            )
+        );
+        return $id ? (int) $id : $default;
     }
 
     private function get_contents($url, $options=[])
@@ -119,13 +185,15 @@ class csIndex {
             curl_setopt($ch, CURLOPT_USERPWD, $options['basicAuth']);
         }
 
+        $headers = [];
+        if ($this->index_token) {
+            $headers[] = 'X-ContentSearch-Token: ' . $this->index_token;
+        }
         if ($this->bearer_token) {
-            curl_setopt(
-                $ch,
-                CURLOPT_HTTPHEADER, [
-                    'Authorization: Bearer '. $this->bearer_token
-                ]
-            );
+            $headers[] = 'Authorization: Bearer '. $this->bearer_token;
+        }
+        if ($headers) {
+            curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
         }
 
         if (defined('CURLOPT_AUTOREFERER')) {

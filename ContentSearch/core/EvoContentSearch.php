@@ -85,9 +85,7 @@ class EvoContentSearch
     }
 
     private function firstRun() {
-        if(!$this->saveIndex->hasPlugin()) {
-            $this->saveIndex->createPlugin();
-        }
+        // プラグインの作成・更新は saveAll() の中で行う
         $this->saveIndex->createTable();
         $this->saveIndex->saveAll(null, ['basicAuth' => $this->config('basicAuth')]);
         $this->saveIndex->saveSystemSetting(
