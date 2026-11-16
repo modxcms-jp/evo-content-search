@@ -64,7 +64,7 @@ MODX Evolution用のコンテンツ検索スニペットです。コンテンツ
 
 - テーマは `ContentSearch/themes/<theme>/` 配下に配置します。`config.php` で各テンプレートやスタイルを定義します。
 - `_default` テーマは以下のテンプレートを持ちます。必要に応じてコピーして編集してください。
-  - `template/form.html`：検索フォーム
+  - `template/form.html`：検索フォーム。キーワード入力欄の `name` には `[+keyword-param+]`（`keyword` パラメータの値）を使います
   - `template/result.html`：検索結果 1 件分の表示
   - `template/admin-widget.html`：管理者向けの再インデックス用ウィジェット
   - `template/style.css`：フォームと結果一覧のスタイル
