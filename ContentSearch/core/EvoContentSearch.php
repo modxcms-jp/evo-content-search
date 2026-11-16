@@ -442,6 +442,9 @@ class EvoContentSearch
             );
         };
 
+        // 出現回数を数える REPLACE は大文字小文字を区別するが、LIKE や FULLTEXT は（照合順序によって）区別しない。
+        // 「mysql」で「MySQL」がヒットしたのに回数が 0 にならないよう、本文と語の両方を小文字にそろえて数える
+        $body = "LOWER(COALESCE(stext.plain_text, ''))";
         $parts = [];
         foreach ($this->terms($keyword) as $term) {
             $escaped = db()->escape($term);
@@ -449,7 +452,7 @@ class EvoContentSearch
                 "(CASE WHEN %s THEN 10 ELSE 0 END"
                 . " + CASE WHEN %s THEN 4 ELSE 0 END"
                 . " + CASE WHEN %s THEN 2 ELSE 0 END"
-                . " + LEAST(10, (CHAR_LENGTH(COALESCE(stext.plain_text, '')) - CHAR_LENGTH(REPLACE(COALESCE(stext.plain_text, ''), '%s', ''))) / CHAR_LENGTH('%s')) * 0.5)",
+                . " + LEAST(10, (CHAR_LENGTH({$body}) - CHAR_LENGTH(REPLACE({$body}, LOWER('%s'), ''))) / CHAR_LENGTH('%s')) * 0.5)",
                 $like('stext.pagetitle', $term),
                 $like('content.description', $term),
                 $like('SUBSTRING(stext.plain_text, 1, 300)', $term),
