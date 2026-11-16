@@ -1,7 +1,7 @@
 <?php
 class csIndex {
     private $pluginName = 'ContentSearch';
-    private $version = '1.1.0';
+    private $version = '2.0.0';
     private $config;
     private $bearer_token;
     // ?template=blank で本文だけを取得するためのトークン（plugin-code.php が照合する）
