@@ -244,7 +244,11 @@ class EvoContentSearch
     }
 
     private function addHighlight($str, $keyword) {
-        $keywords = explode(' ', $keyword);
+        // 空の語があると正規表現が空文字に一致し、全文字の間にハイライトが入るので除く
+        $keywords = preg_split('/\s+/u', $keyword, -1, PREG_SPLIT_NO_EMPTY);
+        if (!$keywords) {
+            return $str;
+        }
         foreach ($keywords as $i=>$v) {
             $keywords[$i] = sprintf('(%s)', preg_quote($v, '/'));
         }
@@ -522,7 +526,8 @@ class EvoContentSearch
                     ]
                 );
             }
-            if($total < $limit*$num) {
+            // このページで最後の結果まで表示しきるなら、次のページは作らない
+            if($total <= $limit*$num) {
                 break;
             }
             $num++;
@@ -537,7 +542,8 @@ class EvoContentSearch
     }
 
     public function buildPaginateNext($total,$limit,$offset) {
-        if($total < $limit + $offset) {
+        // 今のページで最後の結果まで表示しきるなら「次へ」は出さない
+        if($total <= $limit + $offset) {
             return $this->config('tplPaginate.no-next');
         }
         return evo()->parseText(
@@ -722,12 +728,16 @@ class EvoContentSearch
         if (!$keyword) {
             return '';
         }
+        // 空白は半角スペース1つにまとめ、前後の空白は取り除く
+        // （末尾に空白が残ると、単語に分けたときに空の語ができる）
         return hsc(
-            preg_replace(
-                '@\s\s+@',
-                ' ',
-                strip_tags(
-                    mb_convert_kana($keyword, 'Kas')
+            trim(
+                preg_replace(
+                    '@\s+@u',
+                    ' ',
+                    strip_tags(
+                        mb_convert_kana($keyword, 'Kas')
+                    )
                 )
             )
         );
