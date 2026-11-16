@@ -720,7 +720,9 @@ class EvoContentSearch
      */
     private function summary($text, $keyword) {
         $length = $this->config('summaryLength');
-        $plain = str_replace('&nbsp;', ' ', strip_tags(htmlspecialchars_decode($text, ENT_QUOTES)));
+        // 本文のタグは索引を作るときに取り除いてあるので、ここでは HTML として扱わない
+        // （タイトルの「&lt;code&gt;」のような文字そのものを strip_tags で消さないため。出力時にエスケープする）
+        $plain = str_replace('&nbsp;', ' ', htmlspecialchars_decode($text, ENT_QUOTES));
         $keyword = htmlspecialchars_decode($keyword, ENT_QUOTES);
         if(mb_strlen($plain) < ($length-30)) {
             return hsc($plain);
