@@ -434,16 +434,20 @@ class EvoContentSearch
         // 出現回数を数える REPLACE は大文字小文字を区別するが、LIKE や FULLTEXT は（照合順序によって）区別しない。
         // 「mysql」で「MySQL」がヒットしたのに回数が 0 にならないよう、本文と語の両方を小文字にそろえて数える
         $body = "LOWER(COALESCE(stext.plain_text, ''))";
+        // キーワードは HTML エスケープ済み（索引の本文 plain_text もエスケープ済みなので、そのまま比べられる）。
+        // タイトル（stext.pagetitle）とディスクリプション（content.description）はエスケープせずに保存されているので、
+        // デコードした語と比べる（「Q&A」が「Q&amp;A」になって一致しない、ということが起きないように）
         $parts = [];
         foreach ($this->terms($keyword) as $term) {
             $escaped = db()->escape($term);
+            $raw = htmlspecialchars_decode($term, ENT_QUOTES);
             $parts[] = sprintf(
                 "(CASE WHEN %s THEN 10 ELSE 0 END"
                 . " + CASE WHEN %s THEN 4 ELSE 0 END"
                 . " + CASE WHEN %s THEN 2 ELSE 0 END"
                 . " + LEAST(10, (CHAR_LENGTH({$body}) - CHAR_LENGTH(REPLACE({$body}, LOWER('%s'), ''))) / CHAR_LENGTH('%s')) * 0.5)",
-                $like('stext.pagetitle', $term),
-                $like('content.description', $term),
+                $like('stext.pagetitle', $raw),
+                $like('content.description', $raw),
                 $like('SUBSTRING(stext.plain_text, 1, 300)', $term),
                 $escaped,
                 $escaped
@@ -453,7 +457,7 @@ class EvoContentSearch
             return '0 as relevance_score';
         }
 
-        $whole = trim($keyword);
+        $whole = htmlspecialchars_decode(trim($keyword), ENT_QUOTES);
         $titleBonus = sprintf(
             "CASE WHEN stext.pagetitle = '%s' THEN 10 WHEN %s THEN 5 ELSE 0 END",
             db()->escape($whole),
@@ -709,30 +713,29 @@ class EvoContentSearch
         );
     }
 
+    /**
+     * 検索結果に出す要約。索引の本文（$text）とキーワード（$keyword）はどちらも HTML エスケープ済み。
+     * いったんデコードして文に分け、切り出したあとでエスケープし直して返す
+     * （エスケープ済みのまま切ると「&am」のように文字参照の途中で切れることがある）
+     */
     private function summary($text, $keyword) {
-        if(mb_strlen($text) < ($this->config('summaryLength')-30)) {
-            return $text;
+        $length = $this->config('summaryLength');
+        $plain = str_replace('&nbsp;', ' ', strip_tags(htmlspecialchars_decode($text, ENT_QUOTES)));
+        $keyword = htmlspecialchars_decode($keyword, ENT_QUOTES);
+        if(mb_strlen($plain) < ($length-30)) {
+            return hsc($plain);
         }
         if(strpos($keyword, ' ')!==false) {
-            return mb_substr($text, 0, $this->config('summaryLength'));
+            return hsc(mb_substr($plain, 0, $length));
         }
-        if(!preg_match('/[亜-熙ぁ-んァ-ヶ]/u', mb_substr($text, 0, $this->config('summaryLength')))) {
-            return mb_substr($text, 0, $this->config('summaryLength'));
+        if(!preg_match('/[亜-熙ぁ-んァ-ヶ]/u', mb_substr($plain, 0, $length))) {
+            return hsc(mb_substr($plain, 0, $length));
         }
         $pettern = strpos(evo()->getConfig('manager_language'), 'japanese')===0
             ? '/[\s\n\.\!\?\,。、]+/u'
             : '/[\n\.\!\?]+/u'
         ;
-        $_ = preg_split(
-            $pettern,
-            str_replace(
-                '&nbsp;',
-                ' ',
-                strip_tags(
-                    htmlspecialchars_decode($text)
-                )
-            )
-        );
+        $_ = preg_split($pettern, $plain);
         $summary = [];
         foreach($_ as $i=>$v) {
             if(mb_stripos($v, $keyword)===false) {
@@ -755,11 +758,11 @@ class EvoContentSearch
             }
         }
         $summary = $this->trimSummary($summary);
-        return mb_substr(
-            ($summary ? implode(' ', $summary) : $text),
+        return hsc(mb_substr(
+            ($summary ? implode(' ', $summary) : $plain),
             0,
-            $this->config('summaryLength')
-        ). '...';
+            $length
+        )). '...';
     }
 
     private function trimSummary($summary) {
@@ -778,6 +781,10 @@ class EvoContentSearch
         return $summary;
     }
 
+    /**
+     * 入力されたキーワードを整える。戻り値は HTML エスケープ済み
+     * （そのままフォームや結果に出せる。索引の本文もエスケープ済みなので、検索にもこの値を使う）
+     */
     public function treatedKeyword($keyword=null) {
         if (!$keyword) {
             return '';
