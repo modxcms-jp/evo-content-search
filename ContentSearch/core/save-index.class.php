@@ -148,34 +148,40 @@ class csIndex {
      * プラグインのコードは作成時に DB へ写されるので、ファイルを更新しても既存サイトには反映されないため
      * 管理者が無効にしたプラグインは、無効のまま中身だけ更新する
      *
+     * 以前の版は「有効なプラグインが無ければ作る」だったので、無効にしてから再構築すると
+     * 同名のプラグインが重複して作られている。古いコードが1件でも有効なまま残ると
+     * ?template=blank の制限を飛ばせるので、同名のものはすべて更新する
+     *
      * @return bool 作成または更新したら true
      */
     public function syncPlugin() {
-        $row = db()->getRow(
-            db()->select(
-                'id,plugincode',
-                db()->getFullTableName('site_plugins'),
-                sprintf("name='%s'", db()->escape($this->pluginName)),
-                'id ASC',
-                1
-            )
+        $rs = db()->select(
+            'id,plugincode',
+            db()->getFullTableName('site_plugins'),
+            sprintf("name='%s'", db()->escape($this->pluginName))
         );
-        if (!$row) {
+        $found = false;
+        $changed = false;
+        while ($row = db()->getRow($rs)) {
+            $found = true;
+            if ($row['plugincode'] === $this->pluginCode()) {
+                continue;
+            }
+            db()->update(
+                [
+                    'description' => db()->escape($this->pluginDescription()),
+                    'plugincode' => db()->escape($this->pluginCode())
+                ],
+                db()->getFullTableName('site_plugins'),
+                'id=' . (int) $row['id']
+            );
+            $changed = true;
+        }
+        if (!$found) {
             $this->createPlugin();
             return true;
         }
-        if ($row['plugincode'] === $this->pluginCode()) {
-            return false;
-        }
-        db()->update(
-            [
-                'description' => db()->escape($this->pluginDescription()),
-                'plugincode' => db()->escape($this->pluginCode())
-            ],
-            db()->getFullTableName('site_plugins'),
-            'id=' . (int) $row['id']
-        );
-        return true;
+        return $changed;
     }
 
     private function pluginCode() {
