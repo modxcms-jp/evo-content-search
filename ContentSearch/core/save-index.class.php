@@ -7,6 +7,7 @@ class csIndex {
     // ?template=blank で本文だけを取得するためのトークン（plugin-code.php が照合する）
     private $index_token;
     private $index_token_id;
+    private $index_token_expires = 0;
 
     public function __construct($config) {
         $this->config = $config;
@@ -57,6 +58,7 @@ class csIndex {
                 continue;
             }
             $url = evo()->makeUrl($row['id'],'','','full');
+            $this->renewIndexToken();
             $this->save(
                 $row,
                 $this->get_contents(
@@ -72,7 +74,7 @@ class csIndex {
 
     /**
      * 取得用のトークンを発行し、ハッシュと有効期限をシステム設定に保存する
-     * （saveAll の max_execution_time に合わせて 10 分有効）
+     * 有効期限は 10 分。取得に時間がかかる大きなサイトでも切れないよう、renewIndexToken() で延ばす
      *
      * インデックス作成は複数のリクエストで同時に始まることがある。1つの設定を共有すると、
      * 後から始まった側が先の側のトークンを上書きし、終わった側が相手のトークンを消してしまうので、
@@ -83,9 +85,24 @@ class csIndex {
         $this->deleteExpiredIndexTokens();
         $this->index_token_id = bin2hex(random_bytes(8));
         $this->index_token = bin2hex(random_bytes(32));
+        $this->saveIndexTokenExpiry();
+    }
+
+    /**
+     * 期限が残り 5 分を切っていたら、期限を 10 分先に延ばす（ページを取得する前に呼ぶ）
+     * max_execution_time は通信の待ち時間を数えないので、取得全体が 10 分を超えることがある
+     */
+    private function renewIndexToken() {
+        if ($this->index_token_id && $this->index_token_expires - time() < 300) {
+            $this->saveIndexTokenExpiry();
+        }
+    }
+
+    private function saveIndexTokenExpiry() {
+        $this->index_token_expires = time() + 600;
         $this->saveSystemSetting(
             'cs_index_token_' . $this->index_token_id,
-            hash('sha256', $this->index_token) . ':' . (time() + 600)
+            hash('sha256', $this->index_token) . ':' . $this->index_token_expires
         );
     }
 
