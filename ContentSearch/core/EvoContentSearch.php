@@ -60,8 +60,11 @@ class EvoContentSearch
     }
 
     public function run() {
-        if(getv('reset') || !db()->tableExists(db()->config['table_prefix'] . 'search_content')) {
-            if(evo()->isLoggedIn('manager')) {
+        $tableExists = db()->tableExists(db()->config['table_prefix'] . 'search_content');
+        if(getv('reset') || !$tableExists) {
+            // 再構築はテーブルを作り直して全ページを取り直す重い処理。
+            // 他サイトに仕込んだリンクで管理者に実行させられないよう（CSRF）、管理者のセッションに結びついたトークンを求める
+            if(evo()->isLoggedIn('manager') && (!$tableExists || $this->isValidResetToken(getv('token')))) {
                 $this->firstRun();
             }
             return;
@@ -206,9 +209,25 @@ class EvoContentSearch
         }
         return evo()->parseText(
             $this->config('tplForm.admin-widget'), [
-                'url' => $this->current_base_url
+                'url' => hsc($this->current_base_url),
+                'token' => $this->resetToken()
             ]
         );
+    }
+
+    /**
+     * インデックス再構築（?reset=）用のトークン。セッション ID から作るので保存は不要
+     */
+    private function resetToken() {
+        if (session_status() !== PHP_SESSION_ACTIVE || session_id() === '') {
+            return '';
+        }
+        return hash_hmac('sha256', 'ContentSearch-reset', session_id());
+    }
+
+    private function isValidResetToken($token) {
+        $expected = $this->resetToken();
+        return $expected !== '' && is_string($token) && hash_equals($expected, $token);
     }
 
     public function set($key, $value) {
@@ -312,10 +331,22 @@ class EvoContentSearch
     private function matchAgainst($keyword) {
         $_ = preg_split('/\s+/u', trim($keyword));
         if(count($_)==1) {
+            // NATURAL LANGUAGE MODE では記号は演算子にならないので、そのまま使える
             return sprintf("'%s*'", db()->escape($keyword));
         }
+        // BOOLEAN MODE では + - ~ ( ) < > @ * " が演算子になり、
+        // 「テスト -」のような入力が構文エラーになるので、空白に置き換えてから語に分け直す
+        $terms = preg_split(
+            '/\s+/u',
+            trim(preg_replace('/[+\-~()<>@*"]+/u', ' ', $keyword)),
+            -1,
+            PREG_SPLIT_NO_EMPTY
+        );
+        if(count($terms) < 2) {
+            return sprintf("'%s*'", db()->escape($terms ? $terms[0] : trim($keyword)));
+        }
         $keywords = [];
-        foreach($_ as $v) {
+        foreach($terms as $v) {
             $keywords[] = '+' . db()->escape($v) . '*';
         }
         return sprintf(
@@ -474,11 +505,12 @@ class EvoContentSearch
         );
     }
 
+    // テンプレートの href に入れる URL。パスはリクエストの値そのままなので HTML エスケープする
     private function build_url($query_string) {
         if(!$query_string) {
-            return $this->current_base_url;
+            return hsc($this->current_base_url);
         }
-        return $this->current_base_url . '?' . $query_string;
+        return hsc($this->current_base_url . '?' . $query_string);
     }
 
     public function buildPaginatePages($total,$limit) {
