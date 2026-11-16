@@ -5,7 +5,6 @@ class EvoContentSearch
     private $keyword;
     private $config = [];
     private $saveIndex;
-    private $request;
     private $limit;
     private $offset = 0;
     private $maxLimit = 100;
@@ -18,13 +17,16 @@ class EvoContentSearch
     private $form;
     private $orderby;
     private $paginate;
-    private $likeEscapeChar = '!';
+    private $query;
 
     public function __construct() {
         // 設定を先に読む（csIndex とキーワードの取得は設定を使う）
         $this->config = $this->loadConfig();
 
         include_once __DIR__ . '/save-index.class.php';
+        include_once __DIR__ . '/SearchQuery.class.php';
+        include_once __DIR__ . '/Paginator.class.php';
+        include_once __DIR__ . '/Summary.class.php';
         $this->saveIndex = new csIndex($this->config);
 
         $this->keyword = $this->treatedKeyword(getv($this->keywordParam()));
@@ -179,10 +181,11 @@ class EvoContentSearch
             return;
         }
 
+        $this->query = new csSearchQuery($this->orderby, $this->limit, $this->offset);
         $mode = getv('mode') ?: $this->mode($this->keyword);
-        $total = $this->total($this->keyword, $mode);
+        $total = $this->query->total($this->keyword, $mode);
         if(!$total && $mode === 'fulltext') {
-            $total = $this->total($this->keyword, 'like');
+            $total = $this->query->total($this->keyword, 'like');
             if(!$total) {
                 return;
             }
@@ -191,7 +194,6 @@ class EvoContentSearch
         $this->mode = $mode;
 
         $this->total = $total;
-        $this->request = $_GET;
 
         $bt = microtime(true);
         $this->rows = $this->keyword
@@ -213,7 +215,7 @@ class EvoContentSearch
         }
         $this->results = implode("\n", $results);
         $this->paginate = $this->total
-            ? $this->buildPaginate($this->total, $this->limit, $this->offset)
+            ? $this->paginator()->build($this->total, $this->limit, $this->offset)
             : null
         ;
         $placeholders = [
@@ -274,53 +276,31 @@ class EvoContentSearch
         return $this->$key;
     }
 
-    public function find($keyword) {
-        if($this->mode==='fulltext') {
-            $rs = $this->fulltextQuery($keyword);
-        } else {
-            $rs = $this->likeQuery($keyword);
-        }
+    private function find($keyword) {
+        $rs = $this->query->find($keyword, $this->mode);
+        $summary = new csSummary(
+            $this->config('summaryLength'),
+            $this->config('tplResults.highlight'),
+            strpos(evo()->getConfig('manager_language'), 'japanese') === 0
+        );
         $result = [];
         while($row = db()->getRow($rs)) {
-            $row['summary'] = $this->addHighlight(
-                $this->summary(
-                    $row['plain_text'],
-                    $keyword
-                ),
-                $keyword
-            );
+            $row['summary'] = $summary->make($row['plain_text'], $keyword);
             $row['id'] = $row['doc_id'];
             $result[] = $row;
         }
         return $result;
     }
 
-    private function addHighlight($str, $keyword) {
-        // 空の語があると正規表現が空文字に一致し、全文字の間にハイライトが入るので除く
-        $keywords = preg_split('/\s+/u', $keyword, -1, PREG_SPLIT_NO_EMPTY);
-        if (!$keywords) {
-            return $str;
-        }
-        foreach ($keywords as $i=>$v) {
-            $keywords[$i] = sprintf('(%s)', preg_quote($v, '/'));
-        }
-        return preg_replace(
-            '/('.implode('|', $keywords).')/ui',
-            evo()->parseText(
-                $this->config('tplResults.highlight'),
-                [
-                    'keyword' => '$0'
-                ]
-            ),
-            $str
+    private function paginator() {
+        return new csPaginator(
+            function ($name) {
+                return $this->config('tplPaginate.' . $name);
+            },
+            (bool) $this->config('paginateAlwaysShow'),
+            $this->current_base_url,
+            $_GET
         );
-    }
-
-    public function total($keyword, $mode) {
-        if($mode==='fulltext') {
-            return $this->fetchTotalFulltext($keyword);
-        }
-        return $this->fetchTotalLike($keyword);
     }
 
     private function mode($keyword) {
@@ -335,293 +315,12 @@ class EvoContentSearch
         }
         // 全文検索の索引には最小トークン長より短い語が載らないので、
         // 語のどれか1つでも短ければ（「本文」「検索」など2文字の語）最初から LIKE で探す
-        foreach ($this->terms($keyword) as $term) {
+        foreach (csSearchQuery::terms($keyword) as $term) {
             if(mb_strlen($term) < $min_token_size) {
                 return 'like';
             }
         }
         return 'fulltext';
-    }
-
-    private function fulltextQuery($keyword) {
-        $baseScoreExpr = sprintf(
-            "MATCH (`tokens`) AGAINST (%s)",
-            $this->matchAgainst($keyword)
-        );
-        $field = [
-            sprintf(
-                "stext.*,content.*, %s as base_score",
-                $baseScoreExpr
-            )
-        ];
-        if($this->orderby==='rel') {
-            $field[] = $this->generateRelevanceScore($keyword);
-        }
-
-        return db()->select(
-            implode(',', $field),
-            $this->searchFrom(),
-            $this->fulltextWhere($keyword),
-            $this->orderby==='rel' ? 'relevance_score DESC' : 'stext.publishedon DESC',
-            $this->limit($this->limit, $this->offset)
-        );
-    }
-    private function matchAgainst($keyword) {
-        $_ = preg_split('/\s+/u', trim($keyword));
-        if(count($_)==1) {
-            // NATURAL LANGUAGE MODE では記号は演算子にならないので、そのまま使える
-            return sprintf("'%s*'", db()->escape($keyword));
-        }
-        // BOOLEAN MODE では + - ~ ( ) < > @ * " が演算子になり、
-        // 「テスト -」のような入力が構文エラーになるので、空白に置き換えてから語に分け直す
-        $terms = preg_split(
-            '/\s+/u',
-            trim(preg_replace('/[+\-~()<>@*"]+/u', ' ', $keyword)),
-            -1,
-            PREG_SPLIT_NO_EMPTY
-        );
-        if(count($terms) < 2) {
-            return sprintf("'%s*'", db()->escape($terms ? $terms[0] : trim($keyword)));
-        }
-        $keywords = [];
-        foreach($terms as $v) {
-            $keywords[] = '+' . db()->escape($v) . '*';
-        }
-        return sprintf(
-            "'%s' IN BOOLEAN MODE",
-            implode(' ', $keywords)
-        );
-    }
-
-    private function likeQuery($keyword) {
-        $keyword = trim($keyword);
-        $escapedKeyword = db()->escape($keyword);
-        $occurrenceCountExpr = sprintf(
-            "(LENGTH(stext.plain_text) - LENGTH(REPLACE(stext.plain_text, '%s', ''))) / LENGTH('%s')",
-            $escapedKeyword,
-            $escapedKeyword
-        );
-        $field = [
-            sprintf(
-                "stext.*,content.*, %s AS cnt, %s AS base_score",
-                $occurrenceCountExpr,
-                $occurrenceCountExpr
-            )
-        ];
-        if($this->orderby==='rel') {
-            $field[] = $this->generateRelevanceScore($keyword);
-        }
-        return db()->select(
-            implode(',', $field),
-            $this->searchFrom(),
-            $this->likeWhere($keyword),
-            $this->orderby==='rel' ? 'relevance_score DESC' : 'stext.publishedon DESC',
-            $this->limit($this->limit, $this->offset)
-        );
-    }
-
-    /**
-     * 関連度スコアの SQL 式を作る
-     *
-     * 検索語ごとに、どこに・どれだけ含まれるかを足し合わせる（足し算なので、
-     * 1語が見つからなくても全体が 0 にはならない）。FULLTEXT と LIKE のどちらで探しても同じ式を使う。
-     *
-     *   語ごと: タイトルに含む +10 / 説明に含む +4 / 本文の冒頭300文字に含む +2 / 出現回数 × 0.5（10回まで）
-     *   キーワード全体がタイトルと一致 +10、タイトルの先頭と一致 +5
-     *   新しさ: 公開直後は 1.5 倍、90 日でほぼ半分のボーナスになる
-     *
-     * 2〜3文字の語を減点したり、長い記事を減点したりはしない（日本語では2文字の語が普通にあるため）
-     *
-     * @param string $keyword 検索キーワード
-     * @return string SQL式
-     */
-    private function generateRelevanceScore($keyword) {
-        $escapeChar = db()->escape($this->likeEscapeChar);
-        $like = function ($column, $term, $prefixOnly = false) use ($escapeChar) {
-            return sprintf(
-                "%s LIKE '%s%s%%' ESCAPE '%s'",
-                $column,
-                $prefixOnly ? '' : '%',
-                db()->escape($this->escapeLikeWildcard($term)),
-                $escapeChar
-            );
-        };
-
-        // 出現回数を数える REPLACE は大文字小文字を区別するが、LIKE や FULLTEXT は（照合順序によって）区別しない。
-        // 「mysql」で「MySQL」がヒットしたのに回数が 0 にならないよう、本文と語の両方を小文字にそろえて数える
-        $body = "LOWER(COALESCE(stext.plain_text, ''))";
-        // キーワードは HTML エスケープ済み（索引の本文 plain_text もエスケープ済みなので、そのまま比べられる）。
-        // タイトル（stext.pagetitle）とディスクリプション（content.description）はエスケープせずに保存されているので、
-        // デコードした語と比べる（「Q&A」が「Q&amp;A」になって一致しない、ということが起きないように）
-        $parts = [];
-        foreach ($this->terms($keyword) as $term) {
-            $escaped = db()->escape($term);
-            $raw = htmlspecialchars_decode($term, ENT_QUOTES);
-            $parts[] = sprintf(
-                "(CASE WHEN %s THEN 10 ELSE 0 END"
-                . " + CASE WHEN %s THEN 4 ELSE 0 END"
-                . " + CASE WHEN %s THEN 2 ELSE 0 END"
-                . " + LEAST(10, (CHAR_LENGTH({$body}) - CHAR_LENGTH(REPLACE({$body}, LOWER('%s'), ''))) / CHAR_LENGTH('%s')) * 0.5)",
-                $like('stext.pagetitle', $raw),
-                $like('content.description', $raw),
-                $like('SUBSTRING(stext.plain_text, 1, 300)', $term),
-                $escaped,
-                $escaped
-            );
-        }
-        if (!$parts) {
-            return '0 as relevance_score';
-        }
-
-        $whole = htmlspecialchars_decode(trim($keyword), ENT_QUOTES);
-        $titleBonus = sprintf(
-            "CASE WHEN stext.pagetitle = '%s' THEN 10 WHEN %s THEN 5 ELSE 0 END",
-            db()->escape($whole),
-            $like('stext.pagetitle', $whole, true)
-        );
-
-        return sprintf(
-            "((%s + %s) * (1.0 + 0.5 * EXP(-1.0 * GREATEST(0, UNIX_TIMESTAMP() - stext.publishedon) / 7776000))) as relevance_score",
-            implode(' + ', $parts),
-            $titleBonus
-        );
-    }
-
-    /**
-     * キーワードを検索語に分ける（空白区切り。重複は除き、多すぎる場合は先頭の 10 語まで）
-     */
-    private function terms($keyword) {
-        $terms = array_values(array_unique(
-            preg_split('/\s+/u', trim($keyword), -1, PREG_SPLIT_NO_EMPTY)
-        ));
-        return array_slice($terms, 0, 10);
-    }
-
-    public function buildPaginate($total,$limit,$offset) {
-        if(!$this->config('paginateAlwaysShow') && $total <= $limit) {
-            return null;
-        }
-        return evo()->parseText(
-            $this->config('tplPaginate.wrap'),
-            [
-                'prev' => $this->buildPaginatePrev($limit,$offset),
-                'pages' => $this->buildPaginatePages($total,$limit),
-                'next' => $this->buildPaginateNext($total,$limit,$offset)
-            ]
-        );
-    }
-
-    private function buildPaginatePrev($limit,$offset) {
-        if(!$offset) {
-            return $this->config('tplPaginate.no-prev');
-        }
-        $prevNum = $offset - $limit;
-        unset($this->request['offset']);
-        return evo()->parseText(
-            $this->config('tplPaginate.prev'), [
-                'prev-link' => $this->build_url(
-                    $this->http_merge_query(
-                        $prevNum <= 0
-                            ? []
-                            : ['offset'=>$prevNum]
-                    )
-                )
-            ]
-        );
-    }
-
-    // テンプレートの href に入れる URL。パスはリクエストの値そのままなので HTML エスケープする
-    private function build_url($query_string) {
-        if(!$query_string) {
-            return hsc($this->current_base_url);
-        }
-        return hsc($this->current_base_url . '?' . $query_string);
-    }
-
-    public function buildPaginatePages($total,$limit) {
-        static $content=null;
-        if($content) {
-            return $content;
-        }
-        if(!$this->isInt($total) || !$this->isInt($limit)) {
-            return null;
-        }
-        $c=0;
-        $pages = [];
-        unset($this->request['offset']);
-        $num = !$this->offset ? 1 : round($this->offset/$limit)+1;
-        if($num <= 5) {
-            $num = 1;
-        } elseif(5<$num) {
-            $num = $num-4;
-        }
-        $current_num = ($this->offset/$limit)+1;
-        // $this->config('tplPaginate.current-item'),
-        while($c<10) {
-            if($num==$current_num) {
-                $pages[] = evo()->parsetext(
-                    $this->config('tplPaginate.current-item'), [
-                        'num' => $num
-                    ]
-                );
-            } else {
-                $offset = $num==1 ? 0 : $limit * ($num-1);
-                $pages[] = evo()->parsetext(
-                    $this->config('tplPaginate.linked-item'), [
-                        'num' => $num,
-                        'url' => $this->build_url(
-                            $this->http_merge_query(
-                                $offset
-                                ? ['offset'=>$offset]
-                                : []
-                            )
-                        )
-                    ]
-                );
-            }
-            // このページで最後の結果まで表示しきるなら、次のページは作らない
-            if($total <= $limit*$num) {
-                break;
-            }
-            $num++;
-            $c++;
-        }
-        $content = implode("\n", $pages);
-        return $content;
-    }
-
-    private function isInt($str) {
-        return preg_match('@^[0-9]+$@',$str);
-    }
-
-    public function buildPaginateNext($total,$limit,$offset) {
-        // 今のページで最後の結果まで表示しきるなら「次へ」は出さない
-        if($total <= $limit + $offset) {
-            return $this->config('tplPaginate.no-next');
-        }
-        return evo()->parseText(
-            $this->config('tplPaginate.next'), [
-                'next-link' => $this->build_url(
-                    $this->http_merge_query(['offset'=>($offset + $limit)])
-                )
-            ]
-        );
-    }
-
-    private function http_merge_query($array=[]) {
-        if(!$this->request && !$array) {
-            return null;
-        }
-        return http_build_query($this->mergeRecursive($this->request, $array));
-    }
-
-    private function limit($limit, $offset=0) {
-        $limit = (int) $limit;
-        $offset = (int) $offset;
-        if(!$offset) {
-            return (string) $limit;
-        }
-        return $limit . ' OFFSET ' . $offset;
     }
 
     /**
@@ -639,6 +338,10 @@ class EvoContentSearch
         return min((int) $value, max($this->maxLimit, $default));
     }
 
+    private function isInt($str) {
+        return preg_match('@^[0-9]+$@',$str);
+    }
+
     /**
      * リクエストの offset を 0 以上の整数にする（SQL の OFFSET にそのまま入るため）
      */
@@ -647,156 +350,6 @@ class EvoContentSearch
             return 0;
         }
         return (int) $value;
-    }
-
-    /**
-     * 検索対象のテーブル。インデックスには、作成後に非公開・削除・会員限定にしたページや
-     * 検索対象外にしたページも残っているので、今の状態で公開中のページだけに絞る
-     */
-    private function searchFrom() {
-        return [
-            db()->getFullTableName('search_content') . ' `stext`',
-            'INNER JOIN ' . db()->getFullTableName('site_content') . ' content ON content.id=`stext`.doc_id'
-                . ' AND content.published=1 AND content.deleted=0'
-                . ' AND content.searchable=1 AND content.privateweb=0'
-        ];
-    }
-
-    private function fetchTotalFulltext($keyword) {
-        return db()->getValue(
-            db()->select(
-                'count(*) as total',
-                $this->searchFrom(),
-                $this->fulltextWhere($keyword)
-            )
-        );
-    }
-
-    /**
-     * FULLTEXT の検索条件。InnoDB の標準パーサーは日本語を正しく区切れず、キーワードを含まないページも返すので
-     * （「ホームページ」で「プライバシーポリシー」など）、部分一致の条件を重ねて、キーワードを含むページだけに絞る
-     */
-    private function fulltextWhere($keyword) {
-        return sprintf(
-            "MATCH (`tokens`) AGAINST (%s) AND (%s)",
-            $this->matchAgainst($keyword),
-            $this->likeWhere($keyword)
-        );
-    }
-    private function fetchTotalLike($keyword) {
-        return db()->getValue(
-            db()->select(
-                'count(*) as total',
-                $this->searchFrom(),
-                $this->likeWhere($keyword)
-            )
-        );
-    }
-
-    private function likeWhere($keyword) {
-        $keyword = $this->escapeLikeWildcard($keyword);
-        $escapeChar = db()->escape($this->likeEscapeChar);
-
-        $_ = explode(' ', $keyword);
-        if(count($_)==1) {
-            return sprintf(
-                "plain_text LIKE '%%%s%%' ESCAPE '%s'",
-                db()->escape($keyword),
-                $escapeChar
-            );
-        }
-        $where = [];
-        foreach($_ as $v) {
-            $where[] = sprintf(
-                "plain_text LIKE '%%%s%%' ESCAPE '%s'",
-                db()->escape($v),
-                $escapeChar
-            );
-        }
-        return implode(' AND ', $where);
-    }
-
-    private function escapeLikeWildcard($keyword) {
-        $escapeChar = $this->likeEscapeChar;
-
-        return strtr(
-            $keyword,
-            [
-                $escapeChar => $escapeChar . $escapeChar,
-                '%' => $escapeChar . '%',
-                '_' => $escapeChar . '_'
-            ]
-        );
-    }
-
-    /**
-     * 検索結果に出す要約。索引の本文（$text）とキーワード（$keyword）はどちらも HTML エスケープ済み。
-     * いったんデコードして文に分け、切り出したあとでエスケープし直して返す
-     * （エスケープ済みのまま切ると「&am」のように文字参照の途中で切れることがある）
-     */
-    private function summary($text, $keyword) {
-        $length = $this->config('summaryLength');
-        // 本文のタグは索引を作るときに取り除いてあるので、ここでは HTML として扱わない
-        // （タイトルの「&lt;code&gt;」のような文字そのものを strip_tags で消さないため。出力時にエスケープする）
-        $plain = str_replace('&nbsp;', ' ', htmlspecialchars_decode($text, ENT_QUOTES));
-        $keyword = htmlspecialchars_decode($keyword, ENT_QUOTES);
-        if(mb_strlen($plain) < ($length-30)) {
-            return hsc($plain);
-        }
-        if(strpos($keyword, ' ')!==false) {
-            return hsc(mb_substr($plain, 0, $length));
-        }
-        if(!preg_match('/[亜-熙ぁ-んァ-ヶ]/u', mb_substr($plain, 0, $length))) {
-            return hsc(mb_substr($plain, 0, $length));
-        }
-        $pettern = strpos(evo()->getConfig('manager_language'), 'japanese')===0
-            ? '/[\s\n\.\!\?\,。、]+/u'
-            : '/[\n\.\!\?]+/u'
-        ;
-        $_ = preg_split($pettern, $plain);
-        $summary = [];
-        foreach($_ as $i=>$v) {
-            if(mb_stripos($v, $keyword)===false) {
-                continue;
-            }
-            if(!$i) {
-                $summary[0] = $v;
-                continue;
-            }
-            $prev=$i-1;
-            $next=$i+1;
-            if(!isset($summary[$prev])) {
-                $summary[$prev] = $_[$prev];
-            }
-            if(!isset($summary[$i])) {
-                $summary[$i] = $v;
-            }
-            if(isset($_[$next])) {
-                $summary[$next] = $_[$next];
-            }
-        }
-        $summary = $this->trimSummary($summary);
-        return hsc(mb_substr(
-            ($summary ? implode(' ', $summary) : $plain),
-            0,
-            $length
-        )). '...';
-    }
-
-    private function trimSummary($summary) {
-        // 空の要素を削除
-        $summary = array_filter($summary, function($value) {
-            return !empty($value);
-        });
-
-        // 重複する要素を削除
-        $summary = array_unique($summary);
-
-        // 一文字目が「[」の要素を削除
-        $summary = array_filter($summary, function($value) {
-            return $value[0] !== '[';
-        });
-        return $summary;
     }
 
     /**
