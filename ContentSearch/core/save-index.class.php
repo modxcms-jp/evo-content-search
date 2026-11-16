@@ -24,8 +24,10 @@ class csIndex {
         ini_set('max_execution_time', 600);
         ini_set('default_socket_timeout',600);
 
+        // 公開前（予約公開を含む）の記事も入れる。予約公開の時点では取得しないので、ここで外すと公開後も検索に出ない。
+        // 検索結果に出すかどうかは、検索するときの公開状態で決まる
         $where = [
-            'published=1 and deleted=0 and searchable=1 and privateweb=0'
+            'deleted=0 and searchable=1 and privateweb=0'
         ];
 
         if(!$cs_recent_update) {
@@ -38,38 +40,127 @@ class csIndex {
             $where[] = 'AND id != ' . db()->escape(evo()->documentIdentifier);
         }
         $rs = db()->select(
-            'id,pagetitle,description,content,publishedon,editedon,searchable',
+            'id,pagetitle,description,content,publishedon,editedon,searchable,published',
             db()->getFullTableName('site_content'),
             implode(' ', $where)
         );
 
-        if ($this->bearer_token) {
-            evo()->saveBearerToken($this->bearer_token, time() + 60*60*3);
-        }
-
-        // プラグインを最新のコードにしてから、取得用のトークンを発行する
-        if ($this->syncPlugin()) {
-            evo()->clearCache('full');
-        }
-        $this->issueIndexToken();
-
+        $this->beginCrawl();
         while($row = db()->getRow($rs)) {
             if(!$row['content']) {
                 continue;
             }
-            $url = evo()->makeUrl($row['id'],'','','full');
-            $this->renewIndexToken();
-            $this->save(
-                $row,
-                $this->get_contents(
-                    $url . (strpos($url, '?') === false ? '?' : '&') . 'template=blank',
-                    $options
-                )
-            );
+            $text = $row['published'] ? $this->fetchDocument($row['id'], $options) : false;
+            // 取得できない（公開前など）ときは本文をそのまま使う（スニペットの結果は入らない）
+            $this->save($row, $text === false || $text === null ? $row['content'] : $text);
         }
+        $this->endCrawl();
 
-        $this->revokeIndexToken();
         evo()->clearCache('full');
+    }
+
+    /**
+     * 1件の記事を索引し直す（管理画面で保存・公開したときにプラグインから呼ぶ）
+     * 公開前（予約公開を含む）の記事はページを取得できないので、本文をそのまま索引する（スニペットの結果は入らない）。
+     * 検索結果に出すかどうかは、検索するときの公開状態で決まる
+     */
+    public function saveDocument($id) {
+        if (!db()->tableExists(db()->config['table_prefix'] . 'search_content')) {
+            return;
+        }
+        $id = (int) $id;
+        $row = db()->getRow(
+            db()->select(
+                'id,pagetitle,description,content,publishedon,editedon,published,deleted,searchable,privateweb',
+                db()->getFullTableName('site_content'),
+                'id=' . $id
+            )
+        );
+        if (!$row) {
+            return;
+        }
+        if ($row['deleted'] || !$row['searchable'] || $row['privateweb'] || !$row['content']) {
+            db()->delete(db()->getFullTableName('search_content'), 'doc_id=' . $id);
+            return;
+        }
+        $text = false;
+        if ($row['published']) {
+            $this->beginCrawl();
+            // 公開側だけに Basic 認証をかけているサイトもあるので、設定の basicAuth があれば使う
+            $text = $this->fetchDocument($id, ['basicAuth' => (string) $this->config('basicAuth', '')]);
+            $this->endCrawl();
+        }
+        $this->save($row, $text === false || $text === null ? $row['content'] : $text);
+    }
+
+    // ページを取得する前の準備。プラグインを最新にし、取得用のトークンを発行する
+    private function beginCrawl() {
+        ini_set('max_execution_time', 600);
+        ini_set('default_socket_timeout', 600);
+        if ($this->bearer_token) {
+            evo()->saveBearerToken($this->bearer_token, time() + 60*60*3);
+        }
+        if ($this->syncPlugin()) {
+            evo()->clearCache('full');
+        }
+        $this->issueIndexToken();
+    }
+
+    private function endCrawl() {
+        $this->revokeIndexToken();
+    }
+
+    // テンプレートなし（?template=blank）でページを取得する。失敗したら false
+    private function fetchDocument($id, $options = []) {
+        $url = evo()->makeUrl($id, '', '', 'full');
+        // ウェブリンク（外部サイトを指す記事）では makeUrl() が外部の URL を返す。
+        // 取得には Basic 認証の情報や索引用のトークンを付けるので、サイト自身の URL のときだけ取得する
+        if (!$this->isSiteUrl($url)) {
+            return false;
+        }
+        $this->renewIndexToken();
+        return $this->get_contents(
+            $url . (strpos($url, '?') === false ? '?' : '&') . 'template=blank',
+            $options
+        );
+    }
+
+    // $url がサイト自身（site_url と同じスキーム・ホスト・ポート）を指しているか
+    private function isSiteUrl($url) {
+        $site = parse_url((string) evo()->getConfig('site_url'));
+        $target = parse_url((string) $url);
+        if (empty($site['host']) || empty($target['host'])) {
+            return false;
+        }
+        $origin = function ($u) {
+            $scheme = strtolower(isset($u['scheme']) ? $u['scheme'] : 'http');
+            $port = isset($u['port']) ? (int) $u['port'] : ($scheme === 'https' ? 443 : 80);
+            return $scheme . '://' . strtolower($u['host']) . ':' . $port;
+        };
+        return $origin($site) === $origin($target);
+    }
+
+    /**
+     * プラグイン（管理画面の保存時）が使う設定。スニペットの設定はプラグインからは見えないので、
+     * 管理者が検索ページを開いたときにスニペットが保存しておいたもの（cs_index_options）を読む
+     */
+    public static function savedOptions() {
+        $json = db()->getValue(
+            db()->select(
+                'setting_value',
+                db()->getFullTableName('system_settings'),
+                "setting_name='cs_index_options'"
+            )
+        );
+        $options = $json ? json_decode($json, true) : null;
+        return is_array($options) ? $options : [];
+    }
+
+    public function saveOptions($options) {
+        $json = json_encode($options, JSON_UNESCAPED_UNICODE);
+        if ($json !== json_encode(self::savedOptions(), JSON_UNESCAPED_UNICODE)) {
+            $this->saveSystemSetting('cs_index_options', $json);
+        }
     }
 
     /**
@@ -151,13 +242,45 @@ class csIndex {
             ],
             db()->getFullTableName('site_plugins')
         );
-        db()->insert(
-            [
-                'pluginid' => $id,
-                'evtid' => $this->eventId('OnLoadWebDocument', 91)
-            ],
-            db()->getFullTableName('site_plugin_events')
+        $this->syncPluginEvents($id);
+    }
+
+    // プラグインが受け取るイベント（名前 => 名前で引けなかったときの ID）
+    private function pluginEvents() {
+        return [
+            'OnLoadWebDocument' => 91,
+            'OnDocFormSave' => 31,
+            'OnDocPublished' => 1,
+        ];
+    }
+
+    /**
+     * プラグインに必要なイベントが登録されていなければ登録する
+     * @return bool 登録したら true
+     */
+    private function syncPluginEvents($pluginId) {
+        $registered = [];
+        $rs = db()->select(
+            'evtid',
+            db()->getFullTableName('site_plugin_events'),
+            'pluginid=' . (int) $pluginId
         );
+        while ($row = db()->getRow($rs)) {
+            $registered[(int) $row['evtid']] = true;
+        }
+        $added = false;
+        foreach ($this->pluginEvents() as $name => $defaultId) {
+            $evtId = $this->eventId($name, $defaultId);
+            if (isset($registered[$evtId])) {
+                continue;
+            }
+            db()->insert(
+                ['pluginid' => (int) $pluginId, 'evtid' => $evtId],
+                db()->getFullTableName('site_plugin_events')
+            );
+            $added = true;
+        }
+        return $added;
     }
 
     /**
@@ -179,8 +302,15 @@ class csIndex {
         );
         $found = false;
         $changed = false;
+        $rows = [];
         while ($row = db()->getRow($rs)) {
+            $rows[] = $row;
+        }
+        foreach ($rows as $row) {
             $found = true;
+            if ($this->syncPluginEvents($row['id'])) {
+                $changed = true;
+            }
             if ($row['plugincode'] === $this->pluginCode()) {
                 continue;
             }
@@ -202,10 +332,17 @@ class csIndex {
     }
 
     private function pluginCode() {
-        return preg_replace(
+        $code = preg_replace(
             '@^<\?php\s*@',
             '',
             file_get_contents(__DIR__ . '/plugin-code.php')
+        );
+        // プラグインから索引作成のクラスを読み込めるよう、このディレクトリの場所を埋め込む
+        // （PHP の単一引用符の文字列に入るので \ と ' をエスケープする）
+        return str_replace(
+            '[+cs_core_path+]',
+            str_replace(['\\', "'"], ['\\\\', "\\'"], __DIR__),
+            $code
         );
     }
 
@@ -224,6 +361,21 @@ class csIndex {
         return $id ? (int) $id : $default;
     }
 
+    private function requestBasicAuth() {
+        if (isset($_SERVER['PHP_AUTH_USER'])) {
+            return $_SERVER['PHP_AUTH_USER'] . ':' . (isset($_SERVER['PHP_AUTH_PW']) ? $_SERVER['PHP_AUTH_PW'] : '');
+        }
+        foreach (['HTTP_AUTHORIZATION', 'REDIRECT_HTTP_AUTHORIZATION'] as $key) {
+            if (isset($_SERVER[$key]) && stripos($_SERVER[$key], 'Basic ') === 0) {
+                $decoded = base64_decode(substr($_SERVER[$key], 6), true);
+                if ($decoded !== false && strpos($decoded, ':') !== false) {
+                    return $decoded;
+                }
+            }
+        }
+        return '';
+    }
+
     private function get_contents($url, $options=[])
     {
         $ch = curl_init();
@@ -237,8 +389,11 @@ class csIndex {
             ]
         );
 
-        if (!empty($options['basicAuth'])) {
-            curl_setopt($ch, CURLOPT_USERPWD, $options['basicAuth']);
+        // Basic 認証は、設定（basicAuth）が無ければ、今のリクエスト（管理者のアクセス）の認証情報を使う。
+        // サイト全体に Basic 認証をかけていれば、管理画面にも同じ認証がかかっているので設定しなくても取得できる
+        $basicAuth = !empty($options['basicAuth']) ? $options['basicAuth'] : $this->requestBasicAuth();
+        if ($basicAuth) {
+            curl_setopt($ch, CURLOPT_USERPWD, $basicAuth);
         }
 
         $headers = [];

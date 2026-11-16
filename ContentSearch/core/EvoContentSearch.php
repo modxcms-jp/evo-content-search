@@ -74,6 +74,19 @@ class EvoContentSearch
     }
 
     public function run() {
+        // 索引の作成・更新は管理者のアクセスのときだけ行う。訪問者のリクエストでサイト自身へページを取りに行くと、
+        // その訪問者の表示が遅くなるうえ、Web サーバーの構成によっては取得先を外部に向けられてしまう。
+        // 普段の更新は、管理画面で記事を保存・公開したときにプラグインが行う（ここは取りこぼしの補完）
+        if(!evo()->isLoggedIn('manager')) {
+            return;
+        }
+        // プラグインはスニペットの設定を見られないので、索引に関わる設定を保存しておく。
+        // basicAuth はスニペットのパラメータやテーマの設定ファイルと同じ平文で、システム設定 cs_index_options に入る
+        $this->saveIndex->saveOptions([
+            'additionalKeywordField' => (string) $this->config('additionalKeywordField', ''),
+            'basicAuth' => (string) $this->config('basicAuth', '')
+        ]);
+
         $tableExists = db()->tableExists(db()->config['table_prefix'] . 'search_content');
         if(getv('reset') || !$tableExists) {
             // 再構築はテーブルを作り直して全ページを取り直す重い処理。
