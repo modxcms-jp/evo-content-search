@@ -614,7 +614,6 @@ class EvoContentSearch
             $keyword,
             [
                 $escapeChar => $escapeChar . $escapeChar,
-                '\\' => $escapeChar . '\\',
                 '%' => $escapeChar . '%',
                 '_' => $escapeChar . '_'
             ]
