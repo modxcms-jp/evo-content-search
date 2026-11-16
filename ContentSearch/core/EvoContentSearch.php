@@ -344,10 +344,7 @@ class EvoContentSearch
 
         return db()->select(
             implode(',', $field),
-            [
-                db()->getFullTableName('search_content') . ' stext',
-                'LEFT JOIN ' . db()->getFullTableName('site_content') . ' content ON content.id=`stext`.doc_id'
-            ],
+            $this->searchFrom(),
             sprintf(
                 "MATCH (`tokens`) AGAINST (%s)",
                 // "MATCH (tokens) AGAINST ('%s' IN BOOLEAN MODE)",
@@ -403,10 +400,8 @@ class EvoContentSearch
             $field[] = $this->generateRelevanceScore($keyword);
         }
         return db()->select(
-            implode(',', $field), [
-                db()->getFullTableName('search_content') . ' `stext`',
-                'LEFT JOIN ' . db()->getFullTableName('site_content') . ' content ON content.id=`stext`.doc_id'
-            ],
+            implode(',', $field),
+            $this->searchFrom(),
             $this->likeWhere($keyword),
             $this->orderby==='rel' ? 'relevance_score DESC' : 'stext.publishedon DESC',
             $this->limit($this->limit, $this->offset)
@@ -638,11 +633,24 @@ class EvoContentSearch
         return (int) $value;
     }
 
+    /**
+     * 検索対象のテーブル。インデックスには、作成後に非公開・削除・会員限定にしたページや
+     * 検索対象外にしたページも残っているので、今の状態で公開中のページだけに絞る
+     */
+    private function searchFrom() {
+        return [
+            db()->getFullTableName('search_content') . ' `stext`',
+            'INNER JOIN ' . db()->getFullTableName('site_content') . ' content ON content.id=`stext`.doc_id'
+                . ' AND content.published=1 AND content.deleted=0'
+                . ' AND content.searchable=1 AND content.privateweb=0'
+        ];
+    }
+
     private function fetchTotalFulltext($keyword) {
         return db()->getValue(
             db()->select(
                 'count(*) as total',
-                db()->getFullTableName('search_content'),
+                $this->searchFrom(),
                 sprintf(
                     "MATCH (`tokens`) AGAINST (%s)",
                     // "MATCH (tokens) AGAINST ('%s' IN BOOLEAN MODE)",
@@ -655,7 +663,7 @@ class EvoContentSearch
         return db()->getValue(
             db()->select(
                 'count(*) as total',
-                db()->getFullTableName('search_content'),
+                $this->searchFrom(),
                 $this->likeWhere($keyword)
             )
         );
