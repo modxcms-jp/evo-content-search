@@ -21,15 +21,28 @@ class EvoContentSearch
     private $likeEscapeChar = '!';
 
     public function __construct() {
+        // 設定を先に読む（csIndex とキーワードの取得は設定を使う）
+        $this->config = $this->loadConfig();
+
         include_once __DIR__ . '/save-index.class.php';
         $this->saveIndex = new csIndex($this->config);
 
-        $this->keyword = $this->treatedKeyword(getv('keyword'));
+        $this->keyword = $this->treatedKeyword(getv($this->keywordParam()));
         $this->current_base_url = serverv('query_string')
             ? strstr(serverv('request_uri'), '?', true)
             : serverv('request_uri')
         ;
-        $this->config = $this->loadConfig();
+    }
+
+    /**
+     * キーワードを受け取るクエリパラメータ名（設定の keyword。未設定なら keyword）
+     */
+    private function keywordParam() {
+        $param = $this->config('keyword');
+        if (!is_string($param) || trim($param) === '') {
+            return 'keyword';
+        }
+        return trim($param);
     }
 
     private function loadConfig() {
@@ -38,8 +51,9 @@ class EvoContentSearch
             return $defaultConfig;
         }
 
-        $themeConfigPath = $this->themePath() . event()->params['theme'].'/config.php';
-        if(!event()->params['theme'] || !is_file($themeConfigPath)) {
+        $theme = isset(event()->params['theme']) ? event()->params['theme'] : '';
+        $themeConfigPath = $this->themePath() . $theme . '/config.php';
+        if(!$theme || !is_file($themeConfigPath)) {
             return $this->array_merge($defaultConfig, event()->params);
         }
 
@@ -132,6 +146,7 @@ class EvoContentSearch
         $this->form = evo()->parseText(
             $this->config('tplForm.wrap'), [
                 'keyword' => $this->keyword,
+                'keyword-param' => hsc($this->keywordParam()),
                 'orderby.rel.checked'  => $this->orderby==='rel' ? 'checked' : '',
                 'orderby.date.checked' => $this->orderby==='date' ? 'checked' : '',
                 'limit' => $this->limit,
@@ -187,17 +202,21 @@ class EvoContentSearch
             ? $this->buildPaginate($this->total, $this->limit, $this->offset)
             : null
         ;
-        evo()->setPlaceholder(
-            $this->config('placeholder-key'), [
-                'results'  => $this->results,
-                'time'     => $this->time,
-                'total'    => $this->total,
-                'keyword'  => $this->keyword,
-                'form'     => $this->form,
-                'orderby'  => $this->orderby,
-                'paginate' => $this->paginate
-            ]
-        );
+        $placeholders = [
+            'results'  => $this->results,
+            'time'     => $this->time,
+            'total'    => $this->total,
+            'keyword'  => $this->keyword,
+            'form'     => $this->form,
+            'orderby'  => $this->orderby,
+            'paginate' => $this->paginate
+        ];
+        $placeholderKey = $this->config('placeholder-key');
+        evo()->setPlaceholder($placeholderKey, $placeholders);
+        // 以前の既定値は綴りを誤った ContentSeach だった。既存サイトのテンプレートが動くよう、旧名にも入れる
+        if ($placeholderKey === 'ContentSearch') {
+            evo()->setPlaceholder('ContentSeach', $placeholders);
+        }
     }
 
     private function adminWidgetMessage() {

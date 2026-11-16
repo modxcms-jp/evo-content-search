@@ -1,7 +1,7 @@
 <?php
 return [
     'returnResponse' => true,
-    'placeholder-key' => 'ContentSeach',
+    'placeholder-key' => 'ContentSearch',
     'mode' => 'auto', // auto|fulltext|like
     'limit' => 10,
     'summaryLength'=> 200,
