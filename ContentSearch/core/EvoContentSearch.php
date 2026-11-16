@@ -319,8 +319,12 @@ class EvoContentSearch
             $this->saveIndex->saveSystemSetting('innodb_ft_min_token_size',$min_token_size);
             evo()->clearCache('full');
         }
-        if(mb_strlen($keyword) < $min_token_size) {
-            return 'like';
+        // 全文検索の索引には最小トークン長より短い語が載らないので、
+        // 語のどれか1つでも短ければ（「本文」「検索」など2文字の語）最初から LIKE で探す
+        foreach ($this->terms($keyword) as $term) {
+            if(mb_strlen($term) < $min_token_size) {
+                return 'like';
+            }
         }
         return 'fulltext';
     }
@@ -337,7 +341,7 @@ class EvoContentSearch
             )
         ];
         if($this->orderby==='rel') {
-            $field[] = $this->generateRelevanceScore($keyword, $baseScoreExpr);
+            $field[] = $this->generateRelevanceScore($keyword);
         }
 
         return db()->select(
@@ -398,7 +402,7 @@ class EvoContentSearch
             )
         ];
         if($this->orderby==='rel') {
-            $field[] = $this->generateRelevanceScore($keyword, $occurrenceCountExpr);
+            $field[] = $this->generateRelevanceScore($keyword);
         }
         return db()->select(
             implode(',', $field), [
@@ -412,96 +416,73 @@ class EvoContentSearch
     }
 
     /**
-     * 高度なスコアリング式を生成
+     * 関連度スコアの SQL 式を作る
      *
-     * 以下の要素を考慮した総合スコアを計算:
-     * - フィールド重み付け（タイトル、ディスクリプション、本文冒頭、本文）
-     * - キーワード密度
-     * - 文書の長さによる正規化
-     * - 新しさ（フレッシュネス）
-     * - 短いキーワードの誤ヒット対策
+     * 検索語ごとに、どこに・どれだけ含まれるかを足し合わせる（足し算なので、
+     * 1語が見つからなくても全体が 0 にはならない）。FULLTEXT と LIKE のどちらで探しても同じ式を使う。
      *
-     * MySQL では同じ SELECT 句の別名（base_score など）を式の中で参照できないため、
-     * ベーススコアは別名ではなく式そのものを受け取って埋め込む
+     *   語ごと: タイトルに含む +10 / 説明に含む +4 / 本文の冒頭300文字に含む +2 / 出現回数 × 0.5（10回まで）
+     *   キーワード全体がタイトルと一致 +10、タイトルの先頭と一致 +5
+     *   新しさ: 公開直後は 1.5 倍、90 日でほぼ半分のボーナスになる
+     *
+     * 2〜3文字の語を減点したり、長い記事を減点したりはしない（日本語では2文字の語が普通にあるため）
      *
      * @param string $keyword 検索キーワード
-     * @param string $baseScoreExpr ベーススコアの SQL 式（FULLTEXT の MATCH または出現回数）
      * @return string SQL式
      */
-    private function generateRelevanceScore($keyword, $baseScoreExpr) {
-        $escaped = db()->escape($keyword);
-        $escapedLike = db()->escape($this->escapeLikeWildcard($keyword));
+    private function generateRelevanceScore($keyword) {
         $escapeChar = db()->escape($this->likeEscapeChar);
+        $like = function ($column, $term, $prefixOnly = false) use ($escapeChar) {
+            return sprintf(
+                "%s LIKE '%s%s%%' ESCAPE '%s'",
+                $column,
+                $prefixOnly ? '' : '%',
+                db()->escape($this->escapeLikeWildcard($term)),
+                $escapeChar
+            );
+        };
 
-        return sprintf("
-            (
-                -- ベーススコア（FULLTEXT または 出現回数）
-                COALESCE(%s, 1.0)
+        $parts = [];
+        foreach ($this->terms($keyword) as $term) {
+            $escaped = db()->escape($term);
+            $parts[] = sprintf(
+                "(CASE WHEN %s THEN 10 ELSE 0 END"
+                . " + CASE WHEN %s THEN 4 ELSE 0 END"
+                . " + CASE WHEN %s THEN 2 ELSE 0 END"
+                . " + LEAST(10, (CHAR_LENGTH(COALESCE(stext.plain_text, '')) - CHAR_LENGTH(REPLACE(COALESCE(stext.plain_text, ''), '%s', ''))) / CHAR_LENGTH('%s')) * 0.5)",
+                $like('stext.pagetitle', $term),
+                $like('content.description', $term),
+                $like('SUBSTRING(stext.plain_text, 1, 300)', $term),
+                $escaped,
+                $escaped
+            );
+        }
+        if (!$parts) {
+            return '0 as relevance_score';
+        }
 
-                -- フィールドブースト（多段階の重み付け）
-                * CASE
-                    -- タイトルに完全一致（最高優先）
-                    WHEN stext.pagetitle = '%s' THEN 20.0
-                    -- タイトルの先頭に一致
-                    WHEN stext.pagetitle LIKE '%s%%' ESCAPE '%s' THEN 15.0
-                    -- タイトルに部分一致
-                    WHEN stext.pagetitle LIKE '%%%s%%' ESCAPE '%s' THEN 8.0
-                    -- ディスクリプションに一致
-                    WHEN content.description LIKE '%%%s%%' ESCAPE '%s' THEN 4.0
-                    -- 本文の冒頭300文字以内（重要度高）
-                    WHEN SUBSTRING(stext.plain_text, 1, 300) LIKE '%%%s%%' ESCAPE '%s' THEN 2.5
-                    -- 本文のみ
-                    ELSE 1.0
-                END
-
-                -- 短いキーワード（2-3文字）の誤ヒット対策
-                * CASE
-                    WHEN CHAR_LENGTH('%s') <= 3 THEN
-                        CASE
-                            -- タイトルまたは本文冒頭にあれば信頼度高
-                            WHEN stext.pagetitle LIKE '%%%s%%' ESCAPE '%s'
-                              OR SUBSTRING(stext.plain_text, 1, 200) LIKE '%%%s%%' ESCAPE '%s'
-                            THEN 1.0
-                            -- 本文の中ほど以降は信頼度低（誤ヒットの可能性）
-                            ELSE 0.3
-                        END
-                    ELSE 1.0
-                END
-
-                -- 文書長による正規化（短い文書での一致を優遇）
-                * (1000.0 / (1000.0 + CHAR_LENGTH(stext.plain_text)))
-
-                -- キーワード密度ボーナス（適度な出現頻度を評価）
-                * (1.0 + LEAST(3.0,
-                    (CHAR_LENGTH(stext.plain_text) -
-                     CHAR_LENGTH(REPLACE(stext.plain_text, '%s', '')))
-                    / CHAR_LENGTH('%s') / 20.0
-                ))
-
-                -- フレッシュネスブースト（新しい記事を優遇）
-                -- 90日（7776000秒）ごとに半減
-                * (1.0 + 0.5 * EXP(-1.0 * (UNIX_TIMESTAMP() - stext.publishedon) / 7776000))
-
-            ) as relevance_score
-        ",
-            $baseScoreExpr, // ベーススコア
-            $escaped,      // タイトル完全一致
-            $escapedLike,  // タイトル先頭一致
-            $escapeChar,   // タイトル先頭一致: ESCAPE
-            $escapedLike,  // タイトル部分一致
-            $escapeChar,   // タイトル部分一致: ESCAPE
-            $escapedLike,  // ディスクリプション
-            $escapeChar,   // ディスクリプション: ESCAPE
-            $escapedLike,  // 本文冒頭
-            $escapeChar,   // 本文冒頭: ESCAPE
-            $escaped,      // 短いキーワードチェック用
-            $escapedLike,  // 短いキーワード: タイトル
-            $escapeChar,   // 短いキーワード: タイトル ESCAPE
-            $escapedLike,  // 短いキーワード: 本文冒頭
-            $escapeChar,   // 短いキーワード: 本文冒頭 ESCAPE
-            $escaped,      // キーワード密度計算用
-            $escaped       // キーワード密度計算用
+        $whole = trim($keyword);
+        $titleBonus = sprintf(
+            "CASE WHEN stext.pagetitle = '%s' THEN 10 WHEN %s THEN 5 ELSE 0 END",
+            db()->escape($whole),
+            $like('stext.pagetitle', $whole, true)
         );
+
+        return sprintf(
+            "((%s + %s) * (1.0 + 0.5 * EXP(-1.0 * GREATEST(0, UNIX_TIMESTAMP() - stext.publishedon) / 7776000))) as relevance_score",
+            implode(' + ', $parts),
+            $titleBonus
+        );
+    }
+
+    /**
+     * キーワードを検索語に分ける（空白区切り。重複は除き、多すぎる場合は先頭の 10 語まで）
+     */
+    private function terms($keyword) {
+        $terms = array_values(array_unique(
+            preg_split('/\s+/u', trim($keyword), -1, PREG_SPLIT_NO_EMPTY)
+        ));
+        return array_slice($terms, 0, 10);
     }
 
     public function buildPaginate($total,$limit,$offset) {
